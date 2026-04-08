@@ -166,6 +166,44 @@ agents:
         - "YOUR_CLAUDE_CHANNEL_ID"
 ```
 
+## All Four Agents Example (values.yaml)
+
+```yaml
+agents:
+  kiro:
+    discord:
+      botToken: ""
+      allowedChannels:
+        - "KIRO_CHANNEL_ID"
+  claude:
+    image: ghcr.io/openabdev/openab-claude:78f8d2c
+    command: claude-agent-acp
+    workingDir: /home/node
+    discord:
+      botToken: ""
+      allowedChannels:
+        - "CLAUDE_CHANNEL_ID"
+  codex:
+    image: ghcr.io/openabdev/openab-codex:78f8d2c
+    command: codex-acp
+    workingDir: /home/node
+    discord:
+      botToken: ""
+      allowedChannels:
+        - "CODEX_CHANNEL_ID"
+  gemini:
+    image: ghcr.io/openabdev/openab-gemini:78f8d2c
+    command: gemini
+    args: ["--acp"]
+    workingDir: /home/node
+    discord:
+      botToken: ""
+      allowedChannels:
+        - "GEMINI_CHANNEL_ID"
+    env:
+      GEMINI_API_KEY: "${GEMINI_API_KEY}"
+```
+
 ## Post-Install: Authenticate
 
 Each agent requires a one-time auth. The PVC persists tokens across pod restarts.
