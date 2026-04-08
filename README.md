@@ -49,6 +49,8 @@ helm install openab openab/openab \
 helm install openab openab/openab \
   --set agents.kiro.enabled=false \
   --set agents.codex.command=codex-acp \
+  --set agents.codex.image=ghcr.io/openabdev/openab-codex:78f8d2c \
+  --set agents.codex.workingDir=/home/node \
   --set agents.codex.discord.botToken="$DISCORD_BOT_TOKEN" \
   --set-string 'agents.codex.discord.allowedChannels[0]=YOUR_CHANNEL_ID'
 
@@ -57,6 +59,8 @@ helm install openab openab/openab \
   --set agents.kiro.enabled=false \
   --set agents.gemini.command=gemini \
   --set 'agents.gemini.args={--acp}' \
+  --set agents.gemini.image=ghcr.io/openabdev/openab-gemini:78f8d2c \
+  --set agents.gemini.workingDir=/home/node \
   --set agents.gemini.discord.botToken="$DISCORD_BOT_TOKEN" \
   --set-string 'agents.gemini.discord.allowedChannels[0]=YOUR_CHANNEL_ID'
 ```
