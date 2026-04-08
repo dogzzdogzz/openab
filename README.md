@@ -68,9 +68,10 @@ Each agent is configured under `agents.<name>`:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `image.repository` | `ghcr.io/openabdev/openab` | Container image repository |
-| `image.tag` | `""` | Container image tag |
+| `image.repository` | `ghcr.io/openabdev/openab` | Default container image repository |
+| `image.tag` | `""` (uses appVersion) | Default image tag, defaults to Chart appVersion |
 | `image.pullPolicy` | `IfNotPresent` | Image pull policy |
+| `agents.<name>.image` | `""` | Override full image reference (e.g. `ghcr.io/openabdev/openab-claude:latest`), defaults to `image.repository:appVersion` |
 | `agents.<name>.command` | `kiro-cli` | CLI command to run as agent |
 | `agents.<name>.args` | `["acp", "--trust-all-tools"]` | Arguments passed to the agent CLI |
 | `agents.<name>.workingDir` | `/home/agent` | Working directory for the agent process |
@@ -132,6 +133,7 @@ agents:
     persistence:
       enabled: true
   claude:
+    image: "ghcr.io/openabdev/openab-claude:latest"
     command: claude-agent-acp
     args: []
     discord:
