@@ -21,7 +21,47 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  resolve-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      chart_version: ${{ steps.resolve.outputs.chart_version }}
+      image_sha: ${{ steps.resolve.outputs.image_sha }}
+      is_beta: ${{ steps.resolve.outputs.is_beta }}
+    steps:
+      - name: Resolve and validate tag
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+
+          # Validate tag format
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::Invalid tag format '${TAG}'. Expected v{major}.{minor}.{patch}[-prerelease]"
+            exit 1
+          fi
+
+          CHART_VERSION="${TAG#v}"
+          IMAGE_SHA="${{ github.sha }}"
+          IMAGE_SHA="${IMAGE_SHA:0:7}"
+
+          # Beta if version contains '-' (e.g. 0.7.0-beta.1)
+          if [[ "$CHART_VERSION" == *-* ]]; then
+            IS_BETA="true"
+          else
+            IS_BETA="false"
+          fi
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "chart_version=${CHART_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "image_sha=${IMAGE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "is_beta=${IS_BETA}" >> "$GITHUB_OUTPUT"
+
   build-image:
+    needs: resolve-tag
     strategy:
       matrix:
         variant:
@@ -46,15 +86,6 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Resolve version tag
-        id: tag
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Docker metadata
         id: meta
@@ -89,7 +120,7 @@ jobs:
           retention-days: 1
 
   merge-manifests:
-    needs: build-image
+    needs: [resolve-tag, build-image]
     if: inputs.dry_run != true
     strategy:
       matrix:
@@ -118,15 +149,6 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve version tag
-        id: tag
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -134,9 +156,9 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}${{ matrix.variant.suffix }}
           tags: |
             type=sha,prefix=
-            type=semver,pattern={{version}},value=${{ steps.tag.outputs.value }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ steps.tag.outputs.value }}
-            type=raw,value=latest,enable=${{ !contains(steps.tag.outputs.value, '-') }}
+            type=semver,pattern={{version}},value=${{ needs.resolve-tag.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.resolve-tag.outputs.tag }}
+            type=raw,value=latest,enable=${{ needs.resolve-tag.outputs.is_beta == 'false' }}
 
       - name: Create manifest list
         working-directory: /tmp/digests
@@ -145,8 +167,8 @@ jobs:
             $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}${{ matrix.variant.suffix }}@sha256:%s ' *)
 
   release-chart-beta:
-    needs: merge-manifests
-    if: ${{ inputs.dry_run != true && contains(github.ref_name, '-') }}
+    needs: [resolve-tag, merge-manifests]
+    if: ${{ inputs.dry_run != true && needs.resolve-tag.outputs.is_beta == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -163,21 +185,10 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve version tag
-        id: tag
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Build and push beta chart to OCI
         run: |
-          TAG="${{ steps.tag.outputs.value }}"
-          CHART_VERSION="${TAG#v}"
-          IMAGE_SHA="${{ github.sha }}"
-          IMAGE_SHA="${IMAGE_SHA:0:7}"
+          CHART_VERSION="${{ needs.resolve-tag.outputs.chart_version }}"
+          IMAGE_SHA="${{ needs.resolve-tag.outputs.image_sha }}"
 
           sed -i "s/^version: .*/version: ${CHART_VERSION}/" charts/openab/Chart.yaml
           sed -i "s/^appVersion: .*/appVersion: \"${IMAGE_SHA}\"/" charts/openab/Chart.yaml
@@ -188,8 +199,8 @@ jobs:
           helm push openab-${CHART_VERSION}.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
 
   bump-chart-stable:
-    needs: merge-manifests
-    if: ${{ inputs.dry_run != true && !contains(github.ref_name, '-') }}
+    needs: [resolve-tag, merge-manifests]
+    if: ${{ inputs.dry_run != true && needs.resolve-tag.outputs.is_beta == 'false' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -206,21 +217,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Resolve version tag
-        id: tag
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Update Chart.yaml and values.yaml
         run: |
-          TAG="${{ steps.tag.outputs.value }}"
-          CHART_VERSION="${TAG#v}"
-          IMAGE_SHA="${{ github.sha }}"
-          IMAGE_SHA="${IMAGE_SHA:0:7}"
+          CHART_VERSION="${{ needs.resolve-tag.outputs.chart_version }}"
+          IMAGE_SHA="${{ needs.resolve-tag.outputs.image_sha }}"
           sed -i "s/^version: .*/version: ${CHART_VERSION}/" charts/openab/Chart.yaml
           sed -i "s/^appVersion: .*/appVersion: \"${IMAGE_SHA}\"/" charts/openab/Chart.yaml
           sed -i "s|repository: .*|repository: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}|" charts/openab/values.yaml
@@ -230,10 +230,8 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          TAG="${{ steps.tag.outputs.value }}"
-          CHART_VERSION="${TAG#v}"
-          IMAGE_SHA="${{ github.sha }}"
-          IMAGE_SHA="${IMAGE_SHA:0:7}"
+          CHART_VERSION="${{ needs.resolve-tag.outputs.chart_version }}"
+          IMAGE_SHA="${{ needs.resolve-tag.outputs.image_sha }}"
           BRANCH="chore/chart-${CHART_VERSION}"
           git config user.name "openab-app[bot]"
           git config user.email "274185012+openab-app[bot]@users.noreply.github.com"
