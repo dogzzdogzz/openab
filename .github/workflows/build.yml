@@ -2,32 +2,16 @@ name: Build & Release
 
 on:
   push:
-    branches:
-      - main
-    paths:
-      - "src/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "Dockerfile"
-      - "Dockerfile.*"
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
-      chart_bump:
-        description: 'Chart version bump type'
+      tag:
+        description: 'Version tag (e.g. v0.7.0-beta.1 or v0.7.0)'
         required: true
-        type: choice
-        options:
-          - patch
-          - minor
-          - major
-        default: patch
-      release:
-        description: 'Stable release (no beta suffix)'
-        required: false
-        type: boolean
-        default: false
+        type: string
       dry_run:
-        description: 'Dry run (show changes without committing)'
+        description: 'Dry run (build only, no push or chart bump)'
         required: false
         type: boolean
         default: false
@@ -62,6 +46,15 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve version tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Docker metadata
         id: meta
@@ -109,8 +102,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-    outputs:
-      version: ${{ steps.meta.outputs.version }}
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4
@@ -127,6 +118,15 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve version tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -134,7 +134,9 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}${{ matrix.variant.suffix }}
           tags: |
             type=sha,prefix=
-            type=raw,value=latest
+            type=semver,pattern={{version}},value=${{ steps.tag.outputs.value }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.tag.outputs.value }}
+            type=raw,value=latest,enable=${{ !contains(steps.tag.outputs.value, '-') }}
 
       - name: Create manifest list
         working-directory: /tmp/digests
@@ -161,40 +163,26 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Get current chart version
-        id: current
+      - name: Resolve version tag
+        id: tag
         run: |
-          chart_version=$(grep '^version:' charts/openab/Chart.yaml | awk '{print $2}')
-          echo "chart_version=$chart_version" >> "$GITHUB_OUTPUT"
-
-      - name: Bump chart version
-        id: bump
-        run: |
-          current="${{ steps.current.outputs.chart_version }}"
-          # Strip any existing pre-release suffix for base version
-          base="${current%%-*}"
-          IFS='.' read -r major minor patch <<< "$base"
-          bump_type="${{ inputs.chart_bump }}"
-          bump_type="${bump_type:-patch}"
-          case "$bump_type" in
-            major) major=$((major + 1)); minor=0; patch=0 ;;
-            minor) minor=$((minor + 1)); patch=0 ;;
-            patch) patch=$((patch + 1)) ;;
-          esac
-          # Stable release: clean version. Otherwise: beta with run number.
-          if [ "${{ inputs.release }}" = "true" ]; then
-            new_version="${major}.${minor}.${patch}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
           else
-            new_version="${major}.${minor}.${patch}-beta.${GITHUB_RUN_NUMBER}"
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
-          echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
+
+      - name: Parse chart version from tag
+        id: version
+        run: |
+          # Strip leading 'v' → chart version (e.g. v0.7.0-beta.1 → 0.7.0-beta.1)
+          chart_version="${{ steps.tag.outputs.value }}"
+          chart_version="${chart_version#v}"
+          echo "chart_version=${chart_version}" >> "$GITHUB_OUTPUT"
 
       - name: Resolve image SHA
         id: image-sha
         run: |
-          # Use the commit SHA that triggered this build — this is the SHA
-          # that merge-manifests tagged the Docker image with (type=sha,prefix=).
-          # We capture it here explicitly so it survives the bump commit.
           IMAGE_SHA="${{ github.sha }}"
           IMAGE_SHA="${IMAGE_SHA:0:7}"
           echo "sha=${IMAGE_SHA}" >> "$GITHUB_OUTPUT"
@@ -202,7 +190,8 @@ jobs:
       - name: Update Chart.yaml and values.yaml
         run: |
           IMAGE_SHA="${{ steps.image-sha.outputs.sha }}"
-          sed -i "s/^version: .*/version: ${{ steps.bump.outputs.new_version }}/" charts/openab/Chart.yaml
+          CHART_VERSION="${{ steps.version.outputs.chart_version }}"
+          sed -i "s/^version: .*/version: ${CHART_VERSION}/" charts/openab/Chart.yaml
           sed -i "s/^appVersion: .*/appVersion: \"${IMAGE_SHA}\"/" charts/openab/Chart.yaml
           sed -i "s|repository: .*|repository: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}|" charts/openab/values.yaml
           sed -i "s/tag: .*/tag: \"${IMAGE_SHA}\"/" charts/openab/values.yaml
@@ -211,19 +200,19 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          VERSION="${{ steps.bump.outputs.new_version }}"
+          CHART_VERSION="${{ steps.version.outputs.chart_version }}"
           IMAGE_SHA="${{ steps.image-sha.outputs.sha }}"
-          BRANCH="chore/chart-${VERSION}"
+          BRANCH="chore/chart-${CHART_VERSION}"
           git config user.name "openab-app[bot]"
           git config user.email "274185012+openab-app[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
           git add charts/openab/Chart.yaml charts/openab/values.yaml
-          git commit -m "chore: bump chart to ${VERSION}
+          git commit -m "chore: bump chart to ${CHART_VERSION}
 
           image: ${IMAGE_SHA}"
           git push origin "$BRANCH"
           PR_URL=$(gh pr create \
-            --title "chore: bump chart to ${VERSION}" \
+            --title "chore: bump chart to ${CHART_VERSION}" \
             --body "Auto-generated chart version bump for image \`${IMAGE_SHA}\`." \
             --base main --head "$BRANCH")
           gh pr merge "$PR_URL" --squash --delete-branch
