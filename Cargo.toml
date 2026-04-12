@@ -15,6 +15,11 @@ uuid = { version = "1", features = ["v4"] }
 regex = "1"
 anyhow = "1"
 rand = "0.8"
+clap = { version = "4", features = ["derive"] }
+rpassword = "7"
+atty = "0.2"
+unicode-width = "0.1"
+ureq = { version = "2", features = ["json"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "json"] }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }

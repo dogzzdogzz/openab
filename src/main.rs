@@ -4,6 +4,7 @@ mod discord;
 mod error_display;
 mod format;
 mod reactions;
+mod setup;
 mod stt;
 
 use serenity::prelude::*;
@@ -20,6 +21,14 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "openab=info".into()),
         )
         .init();
+
+    // Setup wizard mode
+    if let Some(arg) = std::env::args().nth(1) {
+        if arg == "setup" {
+            setup::run_setup(None)?;
+            return Ok(());
+        }
+    }
 
     let config_path = std::env::args()
         .nth(1)
