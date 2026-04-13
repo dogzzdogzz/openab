@@ -141,6 +141,11 @@ impl EventHandler for Handler {
                     } else {
                         debug!(filename = %attachment.filename, "skipping audio attachment (STT disabled)");
                     }
+                } else if is_text_attachment(attachment) {
+                    if let Some(content_block) = download_and_read_text_file(attachment).await {
+                        debug!(filename = %attachment.filename, "adding text file attachment");
+                        content_blocks.push(content_block);
+                    }
                 } else if let Some(content_block) = download_and_encode_image(attachment).await {
                     debug!(url = %attachment.url, filename = %attachment.filename, "adding image attachment");
                     content_blocks.push(content_block);
@@ -239,6 +244,56 @@ impl EventHandler for Handler {
     async fn ready(&self, _ctx: Context, ready: Ready) {
         info!(user = %ready.user.name, "discord bot connected");
     }
+}
+
+/// Extensions recognised as text-based files that can be inlined into the prompt.
+const TEXT_EXTENSIONS: &[&str] = &[
+    "txt", "csv", "log", "md", "json", "jsonl", "yaml", "yml", "toml", "xml",
+    "rs", "py", "js", "ts", "jsx", "tsx", "go", "java", "c", "cpp", "h", "hpp",
+    "rb", "sh", "bash", "zsh", "fish", "ps1", "bat", "sql", "html", "css",
+    "scss", "less", "ini", "cfg", "conf", "env", "dockerfile", "makefile",
+];
+
+/// Check if an attachment is a text-based file we can inline.
+fn is_text_attachment(attachment: &serenity::model::channel::Attachment) -> bool {
+    let mime = attachment.content_type.as_deref().unwrap_or("");
+    if mime.starts_with("text/") || mime == "application/json" || mime == "application/xml" {
+        return true;
+    }
+    attachment
+        .filename
+        .rsplit('.')
+        .next()
+        .is_some_and(|ext| TEXT_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
+}
+
+/// Download a text-based file attachment and return it as a ContentBlock::Text.
+/// Files larger than 512 KB are skipped to avoid bloating the prompt.
+async fn download_and_read_text_file(
+    attachment: &serenity::model::channel::Attachment,
+) -> Option<ContentBlock> {
+    const MAX_SIZE: u64 = 512 * 1024; // 512 KB
+
+    if u64::from(attachment.size) > MAX_SIZE {
+        error!(filename = %attachment.filename, size = attachment.size, "text file exceeds 512KB limit");
+        return None;
+    }
+
+    let resp = HTTP_CLIENT.get(&attachment.url).send().await.ok()?;
+    if !resp.status().is_success() {
+        error!(url = %attachment.url, status = %resp.status(), "text file download failed");
+        return None;
+    }
+    let bytes = resp.bytes().await.ok()?;
+
+    let text = String::from_utf8(bytes.to_vec()).unwrap_or_else(|_| {
+        String::from_utf8_lossy(&bytes).into_owned()
+    });
+
+    debug!(filename = %attachment.filename, chars = text.len(), "text file inlined");
+    Some(ContentBlock::Text {
+        text: format!("[File: {}]\n```\n{}\n```", attachment.filename, text),
+    })
 }
 
 /// Check if an attachment is an audio file (voice messages are typically audio/ogg).
