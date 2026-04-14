@@ -27,6 +27,11 @@ data:
     {{- if $cfg.discord.allowBotMessages }}
     allow_bot_messages = "{{ $cfg.discord.allowBotMessages }}"
     {{- end }}
+    {{- range $cfg.discord.trustedBotIds }}
+    {{- if regexMatch "e\\+|E\\+" (toString .) }}
+    {{- fail (printf "discord.trustedBotIds contains a mangled ID: %s — use --set-string instead of --set for bot IDs" (toString .)) }}
+    {{- end }}
+    {{- end }}
     {{- if $cfg.discord.trustedBotIds }}
     trusted_bot_ids = {{ $cfg.discord.trustedBotIds | toJson }}
     {{- end }}

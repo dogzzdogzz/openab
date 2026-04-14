@@ -29,10 +29,10 @@ agents:
     #     allowedChannels:
     #       - "YOUR_CHANNEL_ID"
     #     allowedUsers: []
-    #     # allow_bot_messages: "off" (default) | "mentions" | "all"
+    #     # allowBotMessages: "off" (default) | "mentions" | "all"
     #     # recommended for multi-agent collaboration
     #     allowBotMessages: "off"
-    #     # trusted_bot_ids: []  # empty = any bot (mode permitting)
+    #     # trustedBotIds: []  # empty = any bot (mode permitting)
     #     trustedBotIds: []
     #   workingDir: /home/agent
     #   env: {}
@@ -65,10 +65,10 @@ agents:
         - "YOUR_CHANNEL_ID"
       # ⚠️ Use --set-string for user IDs to avoid float64 precision loss
       allowedUsers: []  # empty = allow all users (default)
-      # allow_bot_messages: "off" (default) | "mentions" | "all"
+      # allowBotMessages: "off" (default) | "mentions" | "all"
       # recommended for multi-agent collaboration
       allowBotMessages: "off"
-      # trusted_bot_ids: []  # empty = any bot (mode permitting); set to restrict
+      # trustedBotIds: []  # empty = any bot (mode permitting); set to restrict
       trustedBotIds: []
     workingDir: /home/agent
     env: {}
