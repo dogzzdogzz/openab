@@ -250,8 +250,12 @@ impl AdapterRouter {
                                     let content = buf_rx.borrow_and_update().clone();
                                     if content != last_content {
                                         let display = if content.chars().count() > streaming_limit {
-                                            let truncated = format::truncate_chars(&content, streaming_limit);
-                                            format!("{truncated}…")
+                                            // Tail-priority: keep the last N chars so user
+                                            // sees the most recent agent output
+                                            let total = content.chars().count();
+                                            let skip = total - streaming_limit;
+                                            let truncated: String = content.chars().skip(skip).collect();
+                                            format!("…(truncated)\n{truncated}")
                                         } else {
                                             content.clone()
                                         };
