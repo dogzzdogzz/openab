@@ -6,13 +6,14 @@ Agents deployed:
 {{- range $name, $cfg := .Values.agents }}
 {{- if ne (include "openab.agentEnabled" $cfg) "false" }}
   • {{ $name }} ({{ $cfg.command }})
-{{- if not (or (and ($cfg.discord).enabled ($cfg.discord).botToken) (and ($cfg.slack).enabled ($cfg.slack).botToken)) }}
-    ⚠️  No bot token provided. Create the secret manually:
+{{- if not (or (and (ne (toString ($cfg.discord).enabled) "false") ($cfg.discord).botToken) (and ($cfg.slack).enabled ($cfg.slack).botToken)) }}
+    ⚠️  No bot token provided. Set one via Helm values or create the secret manually:
     kubectl create secret generic {{ include "openab.agentFullname" (dict "ctx" $ "agent" $name) }} \
-      --from-literal=discord-bot-token="YOUR_DISCORD_TOKEN"
+      --from-literal=discord-bot-token="YOUR_TOKEN"   # for Discord
+    # --from-literal=slack-bot-token="YOUR_TOKEN"      # for Slack
 {{- end }}
 
-{{- if and ($cfg.discord).enabled ($cfg.discord).botToken }}
+{{- if and (ne (toString ($cfg.discord).enabled) "false") ($cfg.discord).botToken }}
     Discord: ✅ configured
 {{- end }}
 {{- if and ($cfg.slack).enabled ($cfg.slack).botToken }}
