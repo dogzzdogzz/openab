@@ -28,15 +28,6 @@ app.kubernetes.io/component: {{ .agent }}
 app.kubernetes.io/version: {{ .ctx.Chart.AppVersion | quote }}
 {{- end }}
 app.kubernetes.io/managed-by: {{ .ctx.Release.Service }}
-{{- with .ctx.Values.labels }}
-{{ toYaml . }}
-{{- end }}
-{{- end }}
-
-{{- define "openab.annotations" -}}
-{{- with .ctx.Values.annotations }}
-{{ toYaml . }}
-{{- end }}
 {{- end }}
 
 {{- define "openab.selectorLabels" -}}

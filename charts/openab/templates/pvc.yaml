@@ -9,10 +9,6 @@ metadata:
   name: {{ include "openab.agentFullname" $d }}
   labels:
     {{- include "openab.labels" $d | nindent 4 }}
-  {{- with (include "openab.annotations" $d) }}
-  annotations:
-    {{- . | nindent 4 }}
-  {{- end }}
 spec:
   accessModes:
     - ReadWriteOnce

@@ -9,10 +9,6 @@ metadata:
   name: {{ include "openab.agentFullname" $d }}
   labels:
     {{- include "openab.labels" $d | nindent 4 }}
-  {{- with (include "openab.annotations" $d) }}
-  annotations:
-    {{- . | nindent 4 }}
-  {{- end }}
 spec:
   # Hardcoded for PVC-backed agents: RWO volumes can't be shared across pods,
   # so rolling updates and multiple replicas are not supported.
@@ -26,18 +22,9 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ $cfg | toJson | sha256sum }}
-        {{- with $cfg.podAnnotations }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
       labels:
         {{- include "openab.selectorLabels" $d | nindent 8 }}
-        {{- with $cfg.podLabels }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
     spec:
-      {{- if hasKey $.Values "automountServiceAccountToken" }}
-      automountServiceAccountToken: {{ $.Values.automountServiceAccountToken }}
-      {{- end }}
       {{- with $.Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}

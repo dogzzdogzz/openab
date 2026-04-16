@@ -16,10 +16,6 @@ containerSecurityContext:
     drop:
       - ALL
 
-# Global labels/annotations applied to all resources
-labels: {}
-annotations: {}
-
 agents:
   kiro:
     enabled: true    # set to false to skip creating resources for this agent
@@ -127,8 +123,6 @@ agents:
       storageClass: ""
       size: 1Gi  # defaults to 1Gi if not set
     agentsMd: ""
-    podLabels: {}
-    podAnnotations: {}
     resources: {}
     nodeSelector: {}
     tolerations: []
