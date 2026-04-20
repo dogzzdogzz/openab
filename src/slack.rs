@@ -646,11 +646,15 @@ pub async fn run_slack_adapter(
                                                 // (except in DMs where app_mention doesn't fire)
                                                 if mentions_bot && !is_dm { continue; }
 
-                                                // Early multibot detection: if this is another bot posting in a thread,
+                                                // Early multibot detection: if this is ANOTHER bot (not us) posting in a thread,
                                                 // cache it immediately so MultibotMentions can use it without an API fetch.
                                                 if is_bot && has_thread {
-                                                    if let Some(thread_ts) = event["thread_ts"].as_str() {
-                                                        adapter.cache_multibot(thread_ts).await;
+                                                    let is_self = adapter.get_bot_user_id().await
+                                                        .is_some_and(|uid| event["user"].as_str() == Some(uid));
+                                                    if !is_self {
+                                                        if let Some(thread_ts) = event["thread_ts"].as_str() {
+                                                            adapter.cache_multibot(thread_ts).await;
+                                                        }
                                                     }
                                                 }
 
