@@ -18,9 +18,16 @@ pub const HARD_BOT_TURN_LIMIT: u32 = 100;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum TurnResult {
+    /// Counter below limits — continue normally.
     Ok,
+    /// Counter == soft_limit — warn once, then stop.
     SoftLimit(u32),
+    /// Counter > soft_limit — silently stop (already warned).
+    Throttled,
+    /// Counter == HARD_BOT_TURN_LIMIT — warn once, then stop.
     HardLimit,
+    /// Counter > HARD_BOT_TURN_LIMIT — silently stop (already warned).
+    Stopped,
 }
 
 pub struct BotTurnTracker {
@@ -37,9 +44,13 @@ impl BotTurnTracker {
         let (soft, hard) = self.counts.entry(thread_id.to_string()).or_insert((0, 0));
         *soft += 1;
         *hard += 1;
-        if *hard >= HARD_BOT_TURN_LIMIT {
+        if *hard > HARD_BOT_TURN_LIMIT {
+            TurnResult::Stopped
+        } else if *hard == HARD_BOT_TURN_LIMIT {
             TurnResult::HardLimit
-        } else if *soft >= self.soft_limit {
+        } else if *soft > self.soft_limit {
+            TurnResult::Throttled
+        } else if *soft == self.soft_limit {
             TurnResult::SoftLimit(*soft)
         } else {
             TurnResult::Ok

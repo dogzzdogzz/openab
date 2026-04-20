@@ -419,6 +419,7 @@ impl EventHandler for Handler {
                         ).await;
                         return;
                     }
+                    TurnResult::Throttled | TurnResult::Stopped => { return; }
                     TurnResult::Ok => {}
                 }
             } else {

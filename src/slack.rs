@@ -580,6 +580,7 @@ pub async fn run_slack_adapter(
                                                             )).await;
                                                             continue;
                                                         }
+                                                        TurnResult::Throttled | TurnResult::Stopped => { continue; }
                                                         TurnResult::Ok => {}
                                                     }
                                                 }
@@ -696,6 +697,7 @@ pub async fn run_slack_adapter(
                                                                     )).await;
                                                                     continue;
                                                                 }
+                                                                TurnResult::Throttled | TurnResult::Stopped => { continue; }
                                                                 TurnResult::Ok => {}
                                                             }
                                                         }
