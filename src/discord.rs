@@ -7,7 +7,8 @@ use crate::media;
 use async_trait::async_trait;
 use std::sync::LazyLock;
 use serenity::builder::{CreateActionRow, CreateCommand, CreateInteractionResponse, CreateInteractionResponseMessage, CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, CreateThread};
-use serenity::http::Http;
+use serenity::http::{Http, HttpError};
+use serenity::Error as SerenityError;
 use serenity::model::application::{ComponentInteractionDataKind, Interaction};
 use serenity::model::channel::{AutoArchiveDuration, Message, ReactionType};
 use serenity::model::gateway::Ready;
@@ -730,6 +731,9 @@ fn discord_msg_ref(msg: &Message) -> MessageRef {
     }
 }
 
+/// Discord error code 160004: a thread has already been created for this message.
+const DISCORD_THREAD_ALREADY_CREATED: isize = 160004;
+
 async fn get_or_create_thread(
     ctx: &Context,
     adapter: &Arc<dyn ChatAdapter>,
@@ -756,7 +760,34 @@ async fn get_or_create_thread(
         parent_id: None,
     };
     let trigger_ref = discord_msg_ref(msg);
-    adapter.create_thread(&parent, &trigger_ref, &thread_name).await
+
+    match adapter.create_thread(&parent, &trigger_ref, &thread_name).await {
+        Ok(ch) => Ok(ch),
+        Err(e) => {
+            // Race condition: another bot already created the thread for this message.
+            // Fetch the message again to get the thread field Discord attaches after creation.
+            let is_already_created = e.downcast_ref::<SerenityError>()
+                .and_then(|se| if let SerenityError::Http(HttpError::UnsuccessfulRequest(ref er)) = se {
+                    Some(er.error.code == DISCORD_THREAD_ALREADY_CREATED)
+                } else {
+                    None
+                })
+                .unwrap_or(false);
+
+            if is_already_created {
+                let updated = msg.channel_id.message(&ctx.http, msg.id).await?;
+                if let Some(thread) = updated.thread {
+                    return Ok(ChannelRef {
+                        platform: "discord".into(),
+                        channel_id: thread.id.get().to_string(),
+                        thread_id: None,
+                        parent_id: Some(msg.channel_id.get().to_string()),
+                    });
+                }
+            }
+            Err(e)
+        }
+    }
 }
 
 
