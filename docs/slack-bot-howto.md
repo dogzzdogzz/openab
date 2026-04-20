@@ -74,27 +74,6 @@ export SLACK_BOT_TOKEN="xoxb-..."
 export SLACK_APP_TOKEN="xapp-..."
 ```
 
-## 6b. (Optional) Register Slash Commands
-
-openab handles three slash commands: `/models` (switch model), `/agents` (switch agent mode), `/cancel` (cancel the current turn). They arrive over Socket Mode — no Request URL needed — but Slack still requires you to declare each command in the app manifest.
-
-1. In the left sidebar, click **Slash Commands** → **Create New Command**
-2. Create each command with these settings:
-
-| Command | Short Description | Usage Hint |
-|---------|-------------------|------------|
-| `/models` | Select the AI model for this session | — |
-| `/agents` | Select the agent mode for this session | — |
-| `/cancel` | Cancel the current operation | — |
-
-3. Leave the **Request URL** empty (Socket Mode delivers the payload)
-4. Add the **Interactivity** bot token scope by enabling **Interactivity & Shortcuts** in the sidebar — leave the Request URL empty there too
-5. Reinstall the app when prompted
-
-The commands pick up the ACP session's `configOptions` and render an ephemeral select menu. `/cancel` sends a cancel signal to the active turn.
-
-Commands are keyed by channel; switching model in a channel's main composer affects subsequent sessions started from that channel.
-
 ## 7. Invite the Bot
 
 In each Slack channel where you want to use the bot:

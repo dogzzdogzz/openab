@@ -1,5 +1,4 @@
 use crate::acp::ContentBlock;
-use crate::acp::protocol::ConfigOption;
 use crate::adapter::{AdapterRouter, ChatAdapter, ChannelRef, MessageRef, SenderContext};
 use crate::bot_turns::{BotTurnTracker, TurnResult, HARD_BOT_TURN_LIMIT};
 use crate::config::{AllowBots, AllowUsers, SttConfig};
@@ -94,17 +93,6 @@ impl SlackAdapter {
         let mut cache = self.multibot_threads.lock().await;
         cache.entry(thread_ts.to_string()).or_insert_with(tokio::time::Instant::now);
         enforce_cache_bounds(&mut cache, self.session_ttl);
-    }
-
-    /// POST a JSON body to a Slack `response_url` (slash command / interactive callback).
-    /// Slack accepts this without the bot token — the URL itself is the auth.
-    async fn post_response_url(&self, response_url: &str, body: &serde_json::Value) {
-        if response_url.is_empty() {
-            return;
-        }
-        if let Err(e) = self.client.post(response_url).json(body).send().await {
-            warn!(error = %e, "failed to post to response_url");
-        }
     }
 
     /// Get the bot's own Slack user ID (cached after first call).
@@ -550,26 +538,20 @@ pub async fn run_slack_adapter(
                                             .await;
                                     }
 
-                                    // Slash commands (/models, /agents, /cancel)
-                                    if envelope["type"].as_str() == Some("slash_commands") {
-                                        let payload = envelope["payload"].clone();
-                                        let adapter = adapter.clone();
-                                        let router = router.clone();
-                                        tokio::spawn(async move {
-                                            handle_slash_command(&adapter, &router, &payload).await;
-                                        });
-                                        continue;
-                                    }
-
-                                    // Interactive components (select menu selections)
-                                    if envelope["type"].as_str() == Some("interactive") {
-                                        let payload = envelope["payload"].clone();
-                                        let adapter = adapter.clone();
-                                        let router = router.clone();
-                                        tokio::spawn(async move {
-                                            handle_interactive(&adapter, &router, &payload).await;
-                                        });
-                                        continue;
+                                    // Slash commands and interactive block_actions aren't
+                                    // handled on Slack: slash commands are blocked by Slack
+                                    // in thread composers, and the channel-level delivery
+                                    // lacks the thread_ts needed to route to a session.
+                                    // Ack only; ignore payload.
+                                    match envelope["type"].as_str() {
+                                        Some("slash_commands") | Some("interactive") => {
+                                            debug!(
+                                                envelope_type = envelope["type"].as_str().unwrap_or(""),
+                                                "ignoring Slack envelope type (not supported on this adapter)"
+                                            );
+                                            continue;
+                                        }
+                                        _ => {}
                                     }
 
                                     // Route events
@@ -1111,216 +1093,6 @@ async fn handle_message(
     }
 }
 
-// --- Slash commands & interactive blocks ---
-
-/// Dispatch an incoming Slack slash command payload.
-/// Commands handled: `/models` / `/model`, `/agents` / `/agent`, `/cancel`.
-/// Users configure the actual command names in the Slack App dashboard; this
-/// just matches whatever shape comes in.
-async fn handle_slash_command(
-    adapter: &SlackAdapter,
-    router: &AdapterRouter,
-    payload: &serde_json::Value,
-) {
-    let command = payload["command"].as_str().unwrap_or("");
-    let channel_id = payload["channel_id"].as_str().unwrap_or("");
-    let response_url = payload["response_url"].as_str().unwrap_or("");
-    if response_url.is_empty() || channel_id.is_empty() {
-        return;
-    }
-
-    // Slack slash commands carry channel context but not thread context in
-    // the payload. Key sessions by channel — matches how non-thread messages
-    // are keyed. Thread-scoped config switching would require a separate UX.
-    let thread_key = format!("slack:{channel_id}");
-
-    let body = match command {
-        "/models" | "/model" => {
-            build_config_response(router, &thread_key, "model", "model").await
-        }
-        "/agents" | "/agent" => {
-            build_config_response(router, &thread_key, "agent", "agent").await
-        }
-        "/cancel" => build_cancel_response(router, &thread_key).await,
-        other => {
-            debug!(command = other, "unknown slash command, ignoring");
-            return;
-        }
-    };
-
-    adapter.post_response_url(response_url, &body).await;
-}
-
-/// Dispatch an incoming Slack interactive payload (block_actions from our select menus).
-async fn handle_interactive(
-    adapter: &SlackAdapter,
-    router: &AdapterRouter,
-    payload: &serde_json::Value,
-) {
-    if payload["type"].as_str() != Some("block_actions") {
-        return;
-    }
-    let response_url = payload["response_url"].as_str().unwrap_or("");
-    if response_url.is_empty() {
-        return;
-    }
-    let action = match payload["actions"].as_array().and_then(|a| a.first()) {
-        Some(a) => a,
-        None => return,
-    };
-    let action_id = action["action_id"].as_str().unwrap_or("");
-    let config_id = match action_id.strip_prefix("acp_config_") {
-        Some(id) if !id.is_empty() => id.to_string(),
-        _ => return,
-    };
-    let selected_value = match action["selected_option"]["value"].as_str() {
-        Some(v) => v.to_string(),
-        None => return,
-    };
-    let channel_id = payload["channel"]["id"].as_str().unwrap_or("");
-    if channel_id.is_empty() {
-        return;
-    }
-    let thread_key = format!("slack:{channel_id}");
-
-    let result = router
-        .pool()
-        .set_config_option(&thread_key, &config_id, &selected_value)
-        .await;
-
-    let text = match result {
-        Ok(updated_options) => {
-            let display_name = updated_options
-                .iter()
-                .find(|o| o.id == config_id)
-                .and_then(|o| o.options.iter().find(|v| v.value == selected_value))
-                .map(|v| v.name.clone())
-                .unwrap_or_else(|| selected_value.clone());
-            format!("✅ Switched to *{display_name}*")
-        }
-        Err(e) => {
-            error!(error = %e, "failed to set config option");
-            format!("❌ Failed to switch: {e}")
-        }
-    };
-
-    let body = serde_json::json!({
-        "response_type": "ephemeral",
-        "replace_original": true,
-        "text": text,
-    });
-    adapter.post_response_url(response_url, &body).await;
-}
-
-/// Build an ephemeral slash-command response containing a select menu populated
-/// from the ACP session's configOptions.
-async fn build_config_response(
-    router: &AdapterRouter,
-    thread_key: &str,
-    category: &str,
-    label: &str,
-) -> serde_json::Value {
-    let options = router.pool().get_config_options(thread_key).await;
-    match build_select_block(&options, category, label) {
-        Some(block) => serde_json::json!({
-            "response_type": "ephemeral",
-            "text": format!("🔧 Select a {label}:"),
-            "blocks": [block],
-        }),
-        None => serde_json::json!({
-            "response_type": "ephemeral",
-            "text": format!("⚠️ No {label} options available. Start a conversation first by @mentioning the bot."),
-        }),
-    }
-}
-
-/// Build the `/cancel` ephemeral response after attempting to cancel the session.
-async fn build_cancel_response(router: &AdapterRouter, thread_key: &str) -> serde_json::Value {
-    let text = match router.pool().cancel_session(thread_key).await {
-        Ok(()) => "🛑 Cancel signal sent.".to_string(),
-        Err(e) => format!("⚠️ {e}"),
-    };
-    serde_json::json!({
-        "response_type": "ephemeral",
-        "text": text,
-    })
-}
-
-/// Build a Slack `section` block with an attached `static_select` element
-/// from ACP `ConfigOption`s. Returns `None` when no options are available.
-fn build_select_block(options: &[ConfigOption], category: &str, label: &str) -> Option<serde_json::Value> {
-    let opt = options.iter().find(|o| o.category.as_deref() == Some(category))?;
-    if opt.options.is_empty() {
-        return None;
-    }
-
-    let menu_options: Vec<serde_json::Value> = opt
-        .options
-        .iter()
-        .map(|o| {
-            let mut item = serde_json::json!({
-                "text": { "type": "plain_text", "text": truncate(&o.name, 75) },
-                "value": o.value.clone(),
-            });
-            if let Some(desc) = &o.description {
-                let trimmed = truncate(desc, 75);
-                item["description"] = serde_json::json!({"type": "plain_text", "text": trimmed});
-            }
-            item
-        })
-        .collect();
-
-    let initial_option = opt
-        .options
-        .iter()
-        .find(|o| o.value == opt.current_value)
-        .map(|o| {
-            let mut item = serde_json::json!({
-                "text": { "type": "plain_text", "text": truncate(&o.name, 75) },
-                "value": o.value.clone(),
-            });
-            if let Some(desc) = &o.description {
-                item["description"] = serde_json::json!({"type": "plain_text", "text": truncate(desc, 75)});
-            }
-            item
-        });
-
-    let current_label = opt
-        .options
-        .iter()
-        .find(|o| o.value == opt.current_value)
-        .map(|o| o.name.as_str())
-        .unwrap_or(opt.current_value.as_str());
-
-    let mut accessory = serde_json::json!({
-        "type": "static_select",
-        "action_id": format!("acp_config_{}", opt.id),
-        "placeholder": {
-            "type": "plain_text",
-            "text": truncate(&format!("Current: {current_label}"), 150),
-        },
-        "options": menu_options,
-    });
-    if let Some(init) = initial_option {
-        accessory["initial_option"] = init;
-    }
-
-    Some(serde_json::json!({
-        "type": "section",
-        "text": { "type": "mrkdwn", "text": format!("🔧 Select a {label}:") },
-        "accessory": accessory,
-    }))
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-    out.push('…');
-    out
-}
-
 /// Strip only the bot's own `<@BOT_UID>` trigger mention.
 /// Other users' mentions stay intact so the LLM can @-mention them back.
 /// If the bot UID isn't known, fall back to returning the text trimmed —
@@ -1388,56 +1160,5 @@ mod tests {
     fn resolve_mentions_unknown_bot_preserves_all() {
         let out = resolve_slack_mentions("<@U1BOT> hi <@U2ALICE>", None);
         assert_eq!(out, "<@U1BOT> hi <@U2ALICE>");
-    }
-
-    /// `truncate` leaves short strings untouched.
-    #[test]
-    fn truncate_short_is_noop() {
-        assert_eq!(truncate("short", 75), "short");
-    }
-
-    /// `truncate` caps at char count, not byte length — safe for multi-byte UTF-8.
-    #[test]
-    fn truncate_handles_multibyte() {
-        let s: String = "日".repeat(100);
-        let out = truncate(&s, 10);
-        assert_eq!(out.chars().count(), 10);
-        assert!(out.ends_with('…'));
-    }
-
-    /// Static-select builder: returns None when no options exist for the category.
-    #[test]
-    fn build_select_block_empty_returns_none() {
-        let opts: Vec<ConfigOption> = vec![];
-        assert!(build_select_block(&opts, "model", "model").is_none());
-    }
-
-    /// Static-select builder: produces a section+static_select with an action_id
-    /// prefixed `acp_config_` so the interactive handler can route it.
-    #[test]
-    fn build_select_block_action_id_prefix() {
-        use crate::acp::protocol::{ConfigOption, ConfigOptionValue};
-        let opts = vec![ConfigOption {
-            id: "model_v2".into(),
-            name: "Model".into(),
-            description: None,
-            category: Some("model".into()),
-            option_type: "enum".into(),
-            current_value: "a".into(),
-            options: vec![
-                ConfigOptionValue { name: "A".into(), value: "a".into(), description: None },
-                ConfigOptionValue { name: "B".into(), value: "b".into(), description: None },
-            ],
-        }];
-        let block = build_select_block(&opts, "model", "model").expect("block");
-        assert_eq!(
-            block["accessory"]["action_id"].as_str(),
-            Some("acp_config_model_v2")
-        );
-        assert_eq!(block["accessory"]["type"].as_str(), Some("static_select"));
-        assert_eq!(
-            block["accessory"]["options"].as_array().map(|a| a.len()),
-            Some(2)
-        );
     }
 }
