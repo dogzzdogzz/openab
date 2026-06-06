@@ -378,10 +378,11 @@ impl ChatAdapter for SlackAdapter {
         let body = build_post_message_body(&channel.channel_id, thread_ts, content);
         let resp = match self.api_post("chat.postMessage", body).await {
             Ok(r) => r,
-            // Graceful degradation: if a workspace lacks the Block Kit `markdown`
-            // block, the API rejects the `blocks` payload. Retry text-only so the
-            // message still lands (mrkdwn fallback) instead of failing outright.
-            Err(e) if is_markdown_block_unsupported(&e) => {
+            // Graceful degradation: if the `blocks` payload is rejected (workspace
+            // lacks the markdown block, or content exceeds the cumulative block
+            // cap), retry text-only so the message still lands (mrkdwn fallback)
+            // instead of failing outright.
+            Err(e) if is_block_payload_rejected(&e) => {
                 warn!(error = %e, "markdown block rejected; retrying chat.postMessage text-only");
                 let fallback = build_post_message_text_only(&channel.channel_id, thread_ts, content);
                 self.api_post("chat.postMessage", fallback).await?
@@ -461,8 +462,8 @@ impl ChatAdapter for SlackAdapter {
         let body = build_update_body(&msg.channel.channel_id, &msg.message_id, content);
         match self.api_post("chat.update", body).await {
             Ok(_) => Ok(()),
-            // See send_message: degrade to text-only if markdown blocks are rejected.
-            Err(e) if is_markdown_block_unsupported(&e) => {
+            // See send_message: degrade to text-only if the blocks payload is rejected.
+            Err(e) if is_block_payload_rejected(&e) => {
                 warn!(error = %e, "markdown block rejected; retrying chat.update text-only");
                 let fallback =
                     build_update_text_only(&msg.channel.channel_id, &msg.message_id, content);
@@ -1365,14 +1366,20 @@ fn is_plain_user_message(subtype: &str, text: &str) -> bool {
 /// (one markdown block per message stays under the API cap).
 const MARKDOWN_BLOCK_LIMIT: usize = 11_900;
 
-/// True if a Slack API error indicates the workspace rejected the Block Kit
-/// `markdown` block payload, so the caller should retry text-only.
-/// Scoped to `invalid_blocks` — Slack's documented error for a malformed/
-/// unsupported `blocks` payload. `invalid_arguments` is a catch-all (bad
-/// channel, missing/invalid `ts`, malformed `thread_ts`, …) and would trigger
-/// a pointless text-only retry that fails identically, so it is excluded.
-fn is_markdown_block_unsupported(e: &anyhow::Error) -> bool {
-    e.to_string().contains("invalid_blocks")
+/// True if a Slack API error indicates the `blocks` payload was rejected, so the
+/// caller should retry text-only:
+/// - `invalid_blocks` — workspace can't render the Block Kit `markdown` block
+///   (malformed/unsupported payload).
+/// - `msg_blocks_too_long` — content exceeds Slack's cumulative ~12k cap across
+///   all `markdown` blocks in one message. Reachable by direct `send_message`
+///   callers that bypass the router's `message_limit` pre-split (e.g. STT echo).
+///
+/// `invalid_arguments` is deliberately excluded — it's a Slack catch-all (bad
+/// channel, missing/invalid `ts`, malformed `thread_ts`, …) and would trigger a
+/// pointless text-only retry that fails identically.
+fn is_block_payload_rejected(e: &anyhow::Error) -> bool {
+    let s = e.to_string();
+    s.contains("invalid_blocks") || s.contains("msg_blocks_too_long")
 }
 
 /// Build Block Kit `markdown` blocks from raw Markdown. Slack renders these
@@ -1866,19 +1873,24 @@ mod tests {
         assert!(upd["text"].is_string());
     }
 
-    /// Error classifier matches only `invalid_blocks` (malformed/unsupported
-    /// blocks). `invalid_arguments` is a Slack catch-all and must NOT trigger a
+    /// Error classifier matches `invalid_blocks` (malformed/unsupported blocks)
+    /// and `msg_blocks_too_long` (over the cumulative block cap) → degrade to
+    /// text. `invalid_arguments` is a Slack catch-all and must NOT trigger a
     /// pointless text-only retry; unrelated errors are ignored too.
     #[test]
-    fn detects_markdown_block_unsupported_errors() {
-        assert!(is_markdown_block_unsupported(&anyhow!(
+    fn detects_block_payload_rejected_errors() {
+        assert!(is_block_payload_rejected(&anyhow!(
             "Slack API chat.postMessage: invalid_blocks"
         )));
         assert!(
-            !is_markdown_block_unsupported(&anyhow!("Slack API chat.update: invalid_arguments")),
-            "invalid_arguments is a catch-all, not a block-support signal"
+            is_block_payload_rejected(&anyhow!("Slack API chat.postMessage: msg_blocks_too_long")),
+            "oversize block payload should degrade to text-only"
         );
-        assert!(!is_markdown_block_unsupported(&anyhow!(
+        assert!(
+            !is_block_payload_rejected(&anyhow!("Slack API chat.update: invalid_arguments")),
+            "invalid_arguments is a catch-all, not a block-rejection signal"
+        );
+        assert!(!is_block_payload_rejected(&anyhow!(
             "Slack API chat.postMessage: channel_not_found"
         )));
     }
