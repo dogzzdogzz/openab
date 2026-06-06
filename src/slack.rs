@@ -365,13 +365,29 @@ impl ChatAdapter for SlackAdapter {
     }
 
     fn message_limit(&self) -> usize {
-        4000
+        // Match the Block Kit `markdown` block cap (12k) minus headroom. Messages
+        // are sent as markdown blocks, so the old 4000 mrkdwn-era limit would
+        // split long replies (and Markdown tables) across messages needlessly —
+        // a mid-table split renders as raw pipes. 11_900 keeps typical tables in
+        // one block and cuts message-spam on long replies.
+        MARKDOWN_BLOCK_LIMIT
     }
 
     async fn send_message(&self, channel: &ChannelRef, content: &str) -> Result<MessageRef> {
-        let body =
-            build_post_message_body(&channel.channel_id, channel.thread_id.as_deref(), content);
-        let resp = self.api_post("chat.postMessage", body).await?;
+        let thread_ts = channel.thread_id.as_deref();
+        let body = build_post_message_body(&channel.channel_id, thread_ts, content);
+        let resp = match self.api_post("chat.postMessage", body).await {
+            Ok(r) => r,
+            // Graceful degradation: if a workspace lacks the Block Kit `markdown`
+            // block, the API rejects the `blocks` payload. Retry text-only so the
+            // message still lands (mrkdwn fallback) instead of failing outright.
+            Err(e) if is_markdown_block_unsupported(&e) => {
+                warn!(error = %e, "markdown block rejected; retrying chat.postMessage text-only");
+                let fallback = build_post_message_text_only(&channel.channel_id, thread_ts, content);
+                self.api_post("chat.postMessage", fallback).await?
+            }
+            Err(e) => return Err(e),
+        };
         let ts = resp["ts"]
             .as_str()
             .ok_or_else(|| anyhow!("no ts in chat.postMessage response"))?;
@@ -443,8 +459,18 @@ impl ChatAdapter for SlackAdapter {
 
     async fn edit_message(&self, msg: &MessageRef, content: &str) -> Result<()> {
         let body = build_update_body(&msg.channel.channel_id, &msg.message_id, content);
-        self.api_post("chat.update", body).await?;
-        Ok(())
+        match self.api_post("chat.update", body).await {
+            Ok(_) => Ok(()),
+            // See send_message: degrade to text-only if markdown blocks are rejected.
+            Err(e) if is_markdown_block_unsupported(&e) => {
+                warn!(error = %e, "markdown block rejected; retrying chat.update text-only");
+                let fallback =
+                    build_update_text_only(&msg.channel.channel_id, &msg.message_id, content);
+                self.api_post("chat.update", fallback).await?;
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn use_streaming(&self, other_bot_present: bool) -> bool {
@@ -1333,10 +1359,18 @@ fn is_plain_user_message(subtype: &str, text: &str) -> bool {
     )
 }
 
-/// Slack caps a single Block Kit `markdown` block at 12,000 characters. We
-/// split below that so long replies become multiple markdown blocks rather
-/// than failing the API call.
+/// Slack caps a single Block Kit `markdown` block at 12,000 characters; we use
+/// 11,900 to keep ~100 chars of headroom. Doubles as the Slack `message_limit`
+/// so the router splits long replies into separate messages at the same bound
+/// (one markdown block per message stays under the API cap).
 const MARKDOWN_BLOCK_LIMIT: usize = 11_900;
+
+/// True if a Slack API error indicates the workspace rejected the Block Kit
+/// `markdown` block payload, so the caller should retry text-only.
+fn is_markdown_block_unsupported(e: &anyhow::Error) -> bool {
+    let s = e.to_string();
+    s.contains("invalid_blocks") || s.contains("invalid_arguments")
+}
 
 /// Build Block Kit `markdown` blocks from raw Markdown. Slack renders these
 /// natively — real headings, lists, tables, blockquotes, and language-tagged
@@ -1379,6 +1413,32 @@ fn build_update_body(channel_id: &str, ts: &str, content: &str) -> serde_json::V
         "channel": channel_id,
         "ts": ts,
         "blocks": build_markdown_blocks(content),
+        "text": markdown_to_mrkdwn(content),
+    })
+}
+
+/// Text-only `chat.postMessage` body (no `blocks`) — degradation path when a
+/// workspace rejects the Block Kit `markdown` block.
+fn build_post_message_text_only(
+    channel_id: &str,
+    thread_ts: Option<&str>,
+    content: &str,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "channel": channel_id,
+        "text": markdown_to_mrkdwn(content),
+    });
+    if let Some(ts) = thread_ts {
+        body["thread_ts"] = serde_json::Value::String(ts.to_string());
+    }
+    body
+}
+
+/// Text-only `chat.update` body (no `blocks`) — see `build_post_message_text_only`.
+fn build_update_text_only(channel_id: &str, ts: &str, content: &str) -> serde_json::Value {
+    serde_json::json!({
+        "channel": channel_id,
+        "ts": ts,
         "text": markdown_to_mrkdwn(content),
     })
 }
@@ -1753,18 +1813,69 @@ mod tests {
         assert_eq!(b["blocks"][0]["text"], "**bold**");
     }
 
-    /// Content over the 12k block cap splits into multiple markdown blocks,
-    /// each within the limit.
+    /// Content over the per-block cap (11,900) splits into multiple markdown
+    /// blocks, each within the limit. Assert on char count — `split_message`
+    /// enforces `chars().count() <= limit`, not byte length.
     #[test]
     fn long_content_splits_into_multiple_markdown_blocks() {
         let big = "lorem ipsum dolor\n".repeat(1000); // > MARKDOWN_BLOCK_LIMIT
-        assert!(big.len() > MARKDOWN_BLOCK_LIMIT);
+        assert!(big.chars().count() > MARKDOWN_BLOCK_LIMIT);
         let blocks = build_markdown_blocks(&big);
         assert!(blocks.len() >= 2, "should split into multiple blocks");
         for blk in &blocks {
             assert_eq!(blk["type"], "markdown");
-            assert!(blk["text"].as_str().unwrap().len() <= MARKDOWN_BLOCK_LIMIT);
+            assert!(blk["text"].as_str().unwrap().chars().count() <= MARKDOWN_BLOCK_LIMIT);
         }
+    }
+
+    /// Regression for the long-table split (review 🔴#1): a Markdown table that
+    /// overflows the old 4000 limit but fits the new 11,900 message_limit must
+    /// stay in a single chunk, so it isn't split mid-table into raw pipe text.
+    #[test]
+    fn typical_long_table_stays_in_one_chunk() {
+        let ttl = std::time::Duration::from_secs(300);
+        let adapter = SlackAdapter::new("xoxb-test".into(), ttl, AllowBots::Mentions);
+        let limit = adapter.message_limit();
+        assert_eq!(limit, MARKDOWN_BLOCK_LIMIT);
+        let mut table = String::from("| col a | col b | col c |\n|---|---|---|\n");
+        for i in 0..120 {
+            table.push_str(&format!("| row {i} aaaa | bbbb {i} | cccc {i} |\n"));
+        }
+        assert!(table.chars().count() > 4000, "table must exceed old limit");
+        assert!(table.chars().count() < limit, "but fit the new one");
+        assert_eq!(
+            crate::format::split_message(&table, limit).len(),
+            1,
+            "table within message_limit must not be split mid-table"
+        );
+    }
+
+    /// Text-only fallback bodies carry `text` and no `blocks` — used when a
+    /// workspace rejects the Block Kit markdown block (review 🔴#2).
+    #[test]
+    fn text_only_fallback_bodies_have_no_blocks() {
+        let post = build_post_message_text_only("C1", Some("1700.1"), "## H\n- x");
+        assert!(post.get("blocks").is_none());
+        assert!(post["text"].is_string());
+        assert_eq!(post["thread_ts"], "1700.1");
+        let upd = build_update_text_only("C1", "1700.9", "**b**");
+        assert!(upd.get("blocks").is_none());
+        assert!(upd["text"].is_string());
+    }
+
+    /// Error classifier recognises the Slack errors that signal markdown blocks
+    /// are unsupported, and ignores unrelated errors.
+    #[test]
+    fn detects_markdown_block_unsupported_errors() {
+        assert!(is_markdown_block_unsupported(&anyhow!(
+            "Slack API chat.postMessage: invalid_blocks"
+        )));
+        assert!(is_markdown_block_unsupported(&anyhow!(
+            "Slack API chat.update: invalid_arguments"
+        )));
+        assert!(!is_markdown_block_unsupported(&anyhow!(
+            "Slack API chat.postMessage: channel_not_found"
+        )));
     }
 
     /// Slack opts into native table rendering (Block Kit markdown), so the
