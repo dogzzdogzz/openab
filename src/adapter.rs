@@ -260,6 +260,16 @@ pub trait ChatAdapter: Send + Sync + 'static {
     /// not be detected until the next message. This is acceptable: the first
     /// response may stream, but subsequent ones will correctly use send-once.
     fn use_streaming(&self, other_bot_present: bool) -> bool;
+
+    /// Whether this platform renders Markdown tables natively. When `true`, the
+    /// router skips the `convert_tables` pre-pass (which rewrites tables into
+    /// code blocks / bullet lists for platforms that cannot render them) and
+    /// lets the platform render the raw Markdown table itself.
+    /// Default: `false` (keep converting). Overridden by Slack (Block Kit
+    /// `markdown` blocks render tables natively).
+    fn renders_native_tables(&self) -> bool {
+        false
+    }
 }
 
 // --- AdapterRouter ---
@@ -460,7 +470,13 @@ impl AdapterRouter {
         let thread_channel = thread_channel.clone();
         let message_limit = adapter.message_limit();
         let streaming = adapter.use_streaming(other_bot_present);
-        let table_mode = self.table_mode;
+        // Platforms that render Markdown tables natively (e.g. Slack Block Kit
+        // `markdown` blocks) skip the table→code/bullets pre-pass.
+        let table_mode = if adapter.renders_native_tables() {
+            TableMode::Off
+        } else {
+            self.table_mode
+        };
         let tool_display = self.reactions_config.tool_display;
         let prompt_hard_timeout = self.prompt_hard_timeout;
         let liveness_check_interval = self.liveness_check_interval;
@@ -919,6 +935,9 @@ mod tests {
         let adapter = TestAdapter;
         // Verify the method is callable and returns the declared value
         assert!(!adapter.use_streaming(false));
+        // renders_native_tables defaults to false: platforms that don't override
+        // it keep the table→code/bullets conversion (e.g. Discord, Gateway).
+        assert!(!adapter.renders_native_tables());
     }
 
     #[test]

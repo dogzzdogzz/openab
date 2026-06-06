@@ -369,14 +369,8 @@ impl ChatAdapter for SlackAdapter {
     }
 
     async fn send_message(&self, channel: &ChannelRef, content: &str) -> Result<MessageRef> {
-        let mrkdwn = markdown_to_mrkdwn(content);
-        let mut body = serde_json::json!({
-            "channel": channel.channel_id,
-            "text": mrkdwn,
-        });
-        if let Some(thread_ts) = &channel.thread_id {
-            body["thread_ts"] = serde_json::Value::String(thread_ts.clone());
-        }
+        let body =
+            build_post_message_body(&channel.channel_id, channel.thread_id.as_deref(), content);
         let resp = self.api_post("chat.postMessage", body).await?;
         let ts = resp["ts"]
             .as_str()
@@ -448,21 +442,17 @@ impl ChatAdapter for SlackAdapter {
     }
 
     async fn edit_message(&self, msg: &MessageRef, content: &str) -> Result<()> {
-        let mrkdwn = markdown_to_mrkdwn(content);
-        self.api_post(
-            "chat.update",
-            serde_json::json!({
-                "channel": msg.channel.channel_id,
-                "ts": msg.message_id,
-                "text": mrkdwn,
-            }),
-        )
-        .await?;
+        let body = build_update_body(&msg.channel.channel_id, &msg.message_id, content);
+        self.api_post("chat.update", body).await?;
         Ok(())
     }
 
     fn use_streaming(&self, other_bot_present: bool) -> bool {
         !other_bot_present
+    }
+
+    fn renders_native_tables(&self) -> bool {
+        true
     }
 }
 
@@ -1343,7 +1333,59 @@ fn is_plain_user_message(subtype: &str, text: &str) -> bool {
     )
 }
 
+/// Slack caps a single Block Kit `markdown` block at 12,000 characters. We
+/// split below that so long replies become multiple markdown blocks rather
+/// than failing the API call.
+const MARKDOWN_BLOCK_LIMIT: usize = 11_900;
+
+/// Build Block Kit `markdown` blocks from raw Markdown. Slack renders these
+/// natively — real headings, lists, tables, blockquotes, and language-tagged
+/// code fences — unlike the legacy `text` mrkdwn field, which flattens headings
+/// to bold and cannot render tables. Long content is split at the block limit,
+/// reusing `format::split_message` so code-fence balance is preserved.
+fn build_markdown_blocks(content: &str) -> Vec<serde_json::Value> {
+    let chunks = if content.len() <= MARKDOWN_BLOCK_LIMIT {
+        vec![content.to_string()]
+    } else {
+        crate::format::split_message(content, MARKDOWN_BLOCK_LIMIT)
+    };
+    chunks
+        .into_iter()
+        .map(|chunk| serde_json::json!({ "type": "markdown", "text": chunk }))
+        .collect()
+}
+
+/// Body for `chat.postMessage`: Block Kit `markdown` blocks (rich rendering)
+/// plus a `text` fallback used for notifications and accessibility.
+fn build_post_message_body(
+    channel_id: &str,
+    thread_ts: Option<&str>,
+    content: &str,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "channel": channel_id,
+        "blocks": build_markdown_blocks(content),
+        "text": markdown_to_mrkdwn(content),
+    });
+    if let Some(ts) = thread_ts {
+        body["thread_ts"] = serde_json::Value::String(ts.to_string());
+    }
+    body
+}
+
+/// Body for `chat.update`: same Block Kit `markdown` blocks + `text` fallback.
+fn build_update_body(channel_id: &str, ts: &str, content: &str) -> serde_json::Value {
+    serde_json::json!({
+        "channel": channel_id,
+        "ts": ts,
+        "blocks": build_markdown_blocks(content),
+        "text": markdown_to_mrkdwn(content),
+    })
+}
+
 /// Convert Markdown (as output by Claude Code) to Slack mrkdwn format.
+/// Used for the `text` fallback field that accompanies Block Kit blocks
+/// (shown in notification previews and to assistive tech).
 fn markdown_to_mrkdwn(text: &str) -> String {
     static BOLD_RE: LazyLock<regex::Regex> =
         LazyLock::new(|| regex::Regex::new(r"\*\*(.+?)\*\*").unwrap());
@@ -1679,5 +1721,58 @@ mod tests {
             !adapter.use_streaming(true),
             "should NOT stream when other bot present"
         );
+    }
+
+    /// chat.postMessage body carries Block Kit `markdown` blocks with the raw
+    /// Markdown preserved (NOT downgraded), plus a `text` fallback and thread_ts.
+    #[test]
+    fn post_message_body_uses_raw_markdown_blocks() {
+        let b = build_post_message_body("C1", Some("1700.1"), "## Heading\n- item");
+        assert_eq!(b["channel"], "C1");
+        assert_eq!(b["thread_ts"], "1700.1");
+        assert_eq!(b["blocks"][0]["type"], "markdown");
+        // Raw markdown preserved — heading is NOT flattened to `*Heading*`.
+        assert_eq!(b["blocks"][0]["text"], "## Heading\n- item");
+        assert!(b["text"].is_string(), "text fallback present for a11y/notifs");
+    }
+
+    /// thread_ts is omitted (top-level post) when the channel has no thread.
+    #[test]
+    fn post_message_body_omits_thread_ts_when_none() {
+        let b = build_post_message_body("C1", None, "hi");
+        assert!(b.get("thread_ts").is_none());
+    }
+
+    /// chat.update body also uses Block Kit `markdown` blocks with raw markdown.
+    #[test]
+    fn update_body_uses_raw_markdown_blocks() {
+        let b = build_update_body("C1", "1700.9", "**bold**");
+        assert_eq!(b["channel"], "C1");
+        assert_eq!(b["ts"], "1700.9");
+        assert_eq!(b["blocks"][0]["type"], "markdown");
+        assert_eq!(b["blocks"][0]["text"], "**bold**");
+    }
+
+    /// Content over the 12k block cap splits into multiple markdown blocks,
+    /// each within the limit.
+    #[test]
+    fn long_content_splits_into_multiple_markdown_blocks() {
+        let big = "lorem ipsum dolor\n".repeat(1000); // > MARKDOWN_BLOCK_LIMIT
+        assert!(big.len() > MARKDOWN_BLOCK_LIMIT);
+        let blocks = build_markdown_blocks(&big);
+        assert!(blocks.len() >= 2, "should split into multiple blocks");
+        for blk in &blocks {
+            assert_eq!(blk["type"], "markdown");
+            assert!(blk["text"].as_str().unwrap().len() <= MARKDOWN_BLOCK_LIMIT);
+        }
+    }
+
+    /// Slack opts into native table rendering (Block Kit markdown), so the
+    /// router skips the table→code-block conversion for Slack.
+    #[test]
+    fn slack_renders_native_tables() {
+        let ttl = std::time::Duration::from_secs(300);
+        let adapter = SlackAdapter::new("xoxb-test".into(), ttl, AllowBots::Mentions);
+        assert!(adapter.renders_native_tables());
     }
 }
