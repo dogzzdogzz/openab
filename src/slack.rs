@@ -1367,9 +1367,12 @@ const MARKDOWN_BLOCK_LIMIT: usize = 11_900;
 
 /// True if a Slack API error indicates the workspace rejected the Block Kit
 /// `markdown` block payload, so the caller should retry text-only.
+/// Scoped to `invalid_blocks` — Slack's documented error for a malformed/
+/// unsupported `blocks` payload. `invalid_arguments` is a catch-all (bad
+/// channel, missing/invalid `ts`, malformed `thread_ts`, …) and would trigger
+/// a pointless text-only retry that fails identically, so it is excluded.
 fn is_markdown_block_unsupported(e: &anyhow::Error) -> bool {
-    let s = e.to_string();
-    s.contains("invalid_blocks") || s.contains("invalid_arguments")
+    e.to_string().contains("invalid_blocks")
 }
 
 /// Build Block Kit `markdown` blocks from raw Markdown. Slack renders these
@@ -1863,16 +1866,18 @@ mod tests {
         assert!(upd["text"].is_string());
     }
 
-    /// Error classifier recognises the Slack errors that signal markdown blocks
-    /// are unsupported, and ignores unrelated errors.
+    /// Error classifier matches only `invalid_blocks` (malformed/unsupported
+    /// blocks). `invalid_arguments` is a Slack catch-all and must NOT trigger a
+    /// pointless text-only retry; unrelated errors are ignored too.
     #[test]
     fn detects_markdown_block_unsupported_errors() {
         assert!(is_markdown_block_unsupported(&anyhow!(
             "Slack API chat.postMessage: invalid_blocks"
         )));
-        assert!(is_markdown_block_unsupported(&anyhow!(
-            "Slack API chat.update: invalid_arguments"
-        )));
+        assert!(
+            !is_markdown_block_unsupported(&anyhow!("Slack API chat.update: invalid_arguments")),
+            "invalid_arguments is a catch-all, not a block-support signal"
+        );
         assert!(!is_markdown_block_unsupported(&anyhow!(
             "Slack API chat.postMessage: channel_not_found"
         )));
