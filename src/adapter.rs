@@ -178,7 +178,7 @@ pub fn split_delivery(
 /// Pure helper: deliberately mirrors the inline branch at the end of
 /// `AdapterRouter::stream_prompt_blocks` so the four-corner truth table can be
 /// exercised in isolation without a live ACP session.
-pub fn finalize_body(
+pub(crate) fn finalize_body(
     reset: bool,
     keep_full_text: bool,
     answer_start: usize,
@@ -1676,15 +1676,20 @@ mod tests {
     }
 
     #[test]
-    fn finalize_body_no_reset_passes_through() {
-        // Non-reset turn: there is no notice to manage, irrespective of the
-        // other two flags. Covers both halves of the cartesian product.
+    fn finalize_body_no_reset_send_once_passes_through() {
+        // Non-reset turn: there is no notice to manage regardless of other flags.
         let body = "the final answer".to_string();
         assert_eq!(
             finalize_body(false, false, 42, body.clone()),
             body,
             "no reset → never prepend (send-once + tools)"
         );
+    }
+
+    #[test]
+    fn finalize_body_no_reset_keep_full_passes_through() {
+        // Non-reset turn with keep_full_text: notice is absent, pass through.
+        let body = "the final answer".to_string();
         assert_eq!(
             finalize_body(false, true, 0, body.clone()),
             body,
