@@ -183,6 +183,17 @@ entries:
     version: 0.1.1
   openab:
   - apiVersion: v2
+    appVersion: 0.10.0-beta.6
+    created: "2026-10-27T16:08:27.949113111Z"
+    description: A lightweight, secure, cloud-native ACP harness that bridges Discord
+      and any ACP-compatible coding CLI.
+    digest: 7721d16283e08790668439585a475a1b258332cabdc96e1a902dea36314761f7
+    name: openab
+    type: application
+    urls:
+    - https://github.com/dogzzdogzz/openab/releases/download/openab-0.10.0-beta.6/openab-0.10.0-beta.6.tgz
+    version: 0.10.0-beta.6
+  - apiVersion: v2
     appVersion: 0.9.0-beta.1
     created: "2026-06-22T00:57:31.188096408Z"
     description: A lightweight, secure, cloud-native ACP harness that bridges Discord
@@ -474,4 +485,4 @@ entries:
     urls:
     - https://github.com/dogzzdogzz/openab/releases/download/openab-telegram-0.1.0/openab-telegram-0.1.0.tgz
     version: 0.1.0
-generated: "2026-06-22T00:57:31.426806291Z"
+generated: "2026-10-27T16:08:28.153825314Z"
